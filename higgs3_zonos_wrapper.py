@@ -6,7 +6,7 @@ The Skyrim AI mod speaks a fixed "Zonos" Gradio API. This module reproduces that
 surface exactly -- 29 positional inputs, a single gr.Audio output returning a
 file path -- and drives audio.cpp's `audiocpp_server` behind it.
 
-The engine is a separate C++ process on an internal port (8081, loopback only),
+The engine is a separate C++ process on an internal port (8084, loopback only),
 and the wrapper is a thin HTTP client whose job is (a) speaking the Zonos API,
 (b) normalising the reference clip, (c) bounding generation length, and (d) not
 binding its port until everything downstream is genuinely warm.

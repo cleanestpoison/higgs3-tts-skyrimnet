@@ -17,7 +17,7 @@ $HIGGS_PORT = 7863
 $HIGGS_HOST = "127.0.0.1"
 
 # The audio.cpp engine. Loopback only -- nothing but the wrapper should reach
-# it. Change only if something else on this machine already owns 8081.
+# it. 8081 is deliberately avoided: SkyrimSE itself listens there.
 $HIGGS_ENGINE_PORT = 8084
 
 # --- Model ------------------------------------------------------------------

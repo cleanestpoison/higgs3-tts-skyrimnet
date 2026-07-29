@@ -246,9 +246,16 @@ is the problem entirely, use the [manual steps](#manual).
 `.\Setup.ps1 -EngineProfile portable`.
 
 **Port already in use** — the launcher names the process holding it. Stop that or
-use `-Port`. Both 7863 and the engine port are checked before the model loads.
+use `-Port`. Both 7863 and the engine port (8084) are checked before the model
+loads. Note that 8081 is *not* free on a Skyrim machine — SkyrimSE listens there
+itself, which is why the engine defaults to 8084.
 
-More in [README.md](README.md#troubleshooting).
+**A line comes out much shorter than expected** — logged as `Short output:`. With
+transcript-free cloning that is the model rather than a bad transcript; try a
+different seed or a cleaner reference clip.
+
+**Anything else** — full logs land in `logs\`, one wrapper log and one engine log
+per run.
 
 ## Reclaiming disk
 
