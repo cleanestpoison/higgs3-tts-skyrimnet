@@ -1,0 +1,19 @@
+# Python environment
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime output -- logs, reference cache, generated audio
+logs/
+*.log
+refcache/
+dl/
+*.wav
+!warmup_ref.wav
+
+# Third-party engine payload (audio.cpp release + GGUF weights).
+# Downloaded per-machine; engine/server.json is regenerated on every launch
+# and embeds an absolute path.
+engine/
+models/

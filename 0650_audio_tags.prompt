@@ -1,0 +1,36 @@
+    {% set dialogue_mode = render_mode == "full" or render_mode == "transform" %}
+{% set thought_mode = render_mode == "thoughts" %}
+{% if (dialogue_mode or thought_mode) %}
+{% set useHiggsTags = get_actor_tts(npc.UUID) == "chatterbox"%}
+{% if useHiggsTags %}
+## Voice Performance Tags
+Use [SQUARE BRACKET TAGS] to direct vocal performance. Place them within the dialogue line, surrounded by spaces.
+
+**Emotion tags** — place at front of spoken sentences they colour:
+[EMOTION-AFFECTION], [EMOTION-ANGER], [EMOTION-AROUSAL], [EMOTION-AWE], [EMOTION-BITTERNESS], [EMOTION-CONFUSION], [EMOTION-CONTEMPLATION], [EMOTION-CONTENTMENT], [EMOTION-DETERMINATION], [EMOTION-DISGUST], [EMOTION-ENTHUSIASM], [EMOTION-FEAR], [EMOTION-HELPLESSNESS], [EMOTION-LONGING], [EMOTION-PRIDE], [EMOTION-RELIEF], [EMOTION-SADNESS], [EMOTION-SHAME], [EMOTION-SURPRISE]
+
+**Style tags** — place at the START of a spoken sentence:
+[STYLE-WHISPERING], [STYLE-SHOUTING], [STYLE-SINGING]
+
+{# **Delivery tags** — place at the START of a spoken sentence:
+PROSODY-EXPRESSIVE_HIGH, PROSODY-EXPRESSIVE_LOW #}
+{#**Pause tags** — place exactly where the pause belongs:
+PROSODY-PAUSE, PROSODY-LONG_PAUSE#}
+
+**Sound tags** — place exactly where the sound happens:
+[SFX-LAUGHTER], [SFX-SIGH], [SFX-COUGH], [SFX-CRYING], [SFX-SCREAMING], [SFX-SNIFF], [SFX-SNEEZE], [SFX-HUMMING]
+
+**How to write each dialogue{% if thought_mode %}/thought{% endif %} line**
+- Write the tag inside square brackets. Never leave them as bare words.
+- Emotion, style and delivery tags go at the beginning of a sentence they apply to — not in the middle of it.
+- Sound tags go inline, at the exact point where the sound occurs.
+- Do NOT spell the sound out yourself — [SFX-LAUGHTER] is enough, don't also write "haha".
+- Do NOT invent tags. Anything not listed above is discarded.
+- Keep them meaningful; typically 0–2 tags per sentence unless the scene demands more.
+**Examples**
+- [EMOTION-FEAR] I'm not going back down into that barrow. [EMOTION-FEAR] Not for all the gold in Skyrim.
+- [EMOTION-ANGER] You dare? [EMOTION-ANGER] I will rip your throat out!
+- [STYLE-WHISPERING] Keep your voice down. [SFX-SNIFF] There's something in the next room.
+- You call that a sword? [SFX-LAUGHTER]
+{% endif %}
+{% endif %}
