@@ -351,3 +351,14 @@ to q8_0 GGUF in
 in this repo are `model_specs\*.json`, vendored unmodified from audio.cpp
 (Apache-2.0, Copyright ShugoAI LLC) because the engine cannot start without them
 and they are absent from the release archives.
+
+## Licence
+
+[Apache-2.0](LICENSE), Copyright 2026 cleanestpoison. This covers the launcher
+scripts, the wrapper and the documentation — the parts written here.
+
+It does **not** cover what `Setup.ps1` downloads. The audio.cpp engine is
+Apache-2.0 (Copyright ShugoAI LLC) and the Higgs Audio v3 weights carry Boson
+AI's own terms; both stay with their upstreams and neither is redistributed
+here. `model_specs\*.json` is vendored unmodified from audio.cpp under the same
+Apache-2.0 licence — see [`model_specs/NOTICE.md`](model_specs/NOTICE.md).
