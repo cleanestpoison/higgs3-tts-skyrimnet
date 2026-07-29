@@ -70,11 +70,11 @@ wrapper rewrites them:
 
 | written by the LLM | sent to the engine |
 | --- | --- |
-| `[EMOTION-FEAR]` | `<|emotion:fear|>` |
-| `[STYLE-WHISPERING]` | `<|style:whispering|>` |
-| `[PROSODY-SPEED_SLOW]` | `<|prosody:speed_slow|>` |
-| `[PROSODY-PAUSE]` | `<|prosody:pause|>` |
-| `[SFX-LAUGHTER]` | `<|sfx:laughter|>Haha,` |
+| `[EMOTION-FEAR]` | `<\|emotion:fear\|>` |
+| `[STYLE-WHISPERING]` | `<\|style:whispering\|>` |
+| `[PROSODY-SPEED_SLOW]` | `<\|prosody:speed_slow\|>` |
+| `[PROSODY-PAUSE]` | `<\|prosody:pause\|>` |
+| `[SFX-LAUGHTER]` | `<\|sfx:laughter\|>Haha,` |
 
 ### Wiring the tags up in SkyrimNet
 
