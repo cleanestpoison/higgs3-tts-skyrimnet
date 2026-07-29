@@ -12,6 +12,10 @@ dl/
 *.wav
 !warmup_ref.wav
 
+# Local reference clips are the user's own voice audio, not repo content.
+samples/*
+!samples/README.md
+
 # Third-party engine payload (audio.cpp release + GGUF weights).
 # Downloaded per-machine; engine/server.json is regenerated on every launch
 # and embeds an absolute path.

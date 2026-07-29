@@ -59,6 +59,26 @@ Options:
 
 Settings live in `config.ps1`.
 
+## Higher-quality reference clips
+
+SkyrimNet resamples every reference clip to **16 kHz** before sending it — even
+the 44.1 kHz files in its own `voice-samples\` folder. Higgs runs at 24 kHz, so
+everything above 8 kHz is discarded before the codec ever sees it.
+
+Drop a clip into `samples\` named after the file the mod uploads and it is used
+instead, at full rate. The name is in the request log:
+
+    Incoming request: ... speaker_audio='...\gradio\<hash>\femalenord.wav', ...
+
+so `samples\femalenord.wav` re-voices every NPC with that voicetype, and
+`samples\serana.wav` covers that one character. Matching ignores case and
+extension; anything ffmpeg reads works. Clips can be added while the server
+runs. Measured on one 8.87 s clip, this lifts the 8–12 kHz band from 0.01 % to
+1.05 % of total energy — the sibilance and air the 16 kHz path removes.
+
+See `samples\README.md` for what makes a good clip. Set `$HIGGS_SAMPLES = 0` to
+always use whatever the mod sends.
+
 ## Control tags
 
 Higgs v3 takes control tokens shaped `<|category:value|>` — 43 of them, across

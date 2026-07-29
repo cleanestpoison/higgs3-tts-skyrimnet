@@ -144,6 +144,22 @@ REF_CACHE_SIZE = int(os.environ.get("HIGGS_REF_CACHE_SIZE", "64"))
 HIGGS_SAMPLE_RATE = int(os.environ.get("HIGGS_SAMPLE_RATE", "24000"))
 REF_MAX_SECONDS = float(os.environ.get("HIGGS_REF_MAX_SECONDS", "60"))
 
+# Local high-quality reference clips, keyed by the *name* of the file the mod
+# uploads. SkyrimNet resamples every reference it sends to 16 kHz -- even the
+# 44.1 kHz clips in its own voice-samples folder -- which throws away everything
+# above 8 kHz before the codec (24 kHz, so ~12 kHz of headroom) ever sees it.
+# A file here named after the incoming upload is used in its place, at whatever
+# rate it is stored, so the clip reaches the engine unspoiled.
+#
+# The key is the upload's filename stem, which is the voicetype for a generic
+# NPC (`femalenord.wav`) and the character for a curated one (`serana.wav`) --
+# so a single file can re-voice every NPC sharing a voicetype, or one named
+# character. Matching is case-insensitive; any format ffmpeg reads will do,
+# since references are normalised on the way in regardless.
+SAMPLES_DIR = Path(os.environ.get("HIGGS_SAMPLES_DIR", str(HERE / "samples")))
+SAMPLES_ENABLED = os.environ.get("HIGGS_SAMPLES", "1") != "0"
+SAMPLE_EXTENSIONS = (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".opus")
+
 SERVER_PORT = int(os.environ.get("HIGGS_PORT", "7863"))
 # WINDOWS: loopback by default. Set HIGGS_HOST=0.0.0.0 to reach it from the LAN.
 SERVER_HOST = os.environ.get("HIGGS_HOST", "127.0.0.1")
@@ -934,6 +950,54 @@ def _resolve_upload(speaker_audio) -> str | None:
     return None
 
 
+# Index of SAMPLES_DIR, rebuilt when the directory's mtime moves so clips can be
+# dropped in while the server runs. Maps lowercased stem -> path; a stem present
+# under several extensions resolves in SAMPLE_EXTENSIONS order.
+_samples_index: dict[str, Path] = {}
+_samples_mtime: float | None = None
+
+
+def _sample_index() -> dict[str, Path]:
+    global _samples_index, _samples_mtime
+    try:
+        mtime = SAMPLES_DIR.stat().st_mtime
+    except OSError:
+        _samples_index, _samples_mtime = {}, None
+        return _samples_index
+    if mtime == _samples_mtime:
+        return _samples_index
+
+    index: dict[str, Path] = {}
+    for entry in sorted(SAMPLES_DIR.iterdir()):
+        if not entry.is_file():
+            continue
+        suffix = entry.suffix.lower()
+        if suffix not in SAMPLE_EXTENSIONS:
+            continue
+        stem = entry.stem.lower()
+        current = index.get(stem)
+        if current is None or SAMPLE_EXTENSIONS.index(suffix) < SAMPLE_EXTENSIONS.index(
+            current.suffix.lower()
+        ):
+            index[stem] = entry
+
+    _samples_index, _samples_mtime = index, mtime
+    logger.info(f"Local samples: {len(index)} clip(s) in {SAMPLES_DIR}")
+    return _samples_index
+
+
+def _local_sample(upload_path: str) -> str | None:
+    """Local override for an upload, matched on filename stem. None if absent."""
+    if not SAMPLES_ENABLED:
+        return None
+    try:
+        match = _sample_index().get(Path(upload_path).stem.lower())
+    except OSError as exc:
+        logger.warning(f"Local samples unreadable: {exc}")
+        return None
+    return str(match) if match else None
+
+
 def generate_audio(
     model,                     # 0  ignored (Zonos model id)
     text,                      # 1  the line to speak
@@ -1008,6 +1072,15 @@ def generate_audio(
     if upload_path is None:
         logger.error("No reference audio supplied; voice cloning requires one")
         return None
+
+    # A local clip of the same name outranks the upload (see SAMPLES_DIR).
+    override = _local_sample(upload_path)
+    if override is not None:
+        logger.info(
+            f"Reference override: {Path(upload_path).name} -> "
+            f"samples\\{Path(override).name}"
+        )
+        upload_path = override
 
     try:
         ref, digest = reference_path(upload_path)

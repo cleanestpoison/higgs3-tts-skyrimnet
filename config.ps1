@@ -61,6 +61,15 @@ $WHISPER_WAIT_SECONDS = 20
 # trimmed under the old value.
 $HIGGS_REF_MAX_SECONDS = 60
 
+# Local reference clips, in samples\. A clip named after the file SkyrimNet
+# uploads (`femalenord.wav`, `serana.wav` -- the name is in the request log) is
+# used instead of that upload. Worth having because SkyrimNet resamples every
+# reference to 16 kHz before sending it, including the 44.1 kHz clips in its own
+# voice-samples\ folder, which costs everything above 8 kHz; Higgs runs at
+# 24 kHz and has room for far more. See samples\README.md. Set to 0 to always
+# use whatever the mod sends.
+$HIGGS_SAMPLES = 1
+
 # --- Generation tunables (engine defaults unless set) ------------------------
 
 # Leave empty to use audio.cpp's own higgs_audio_tts defaults (temperature 0.8,
