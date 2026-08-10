@@ -78,11 +78,10 @@ HIGGS_REQUEST_TIMEOUT = int(os.environ.get("HIGGS_REQUEST_TIMEOUT", "600"))
 # overridden here.
 AUDIO_TEMPERATURE = os.environ.get("HIGGS_TEMPERATURE", "").strip()
 AUDIO_TOP_K = os.environ.get("HIGGS_TOP_K", "").strip()
+AUDIO_REPETITION_PENALTY = os.environ.get("HIGGS_REPETITION_PENALTY", "").strip()
+TEXT_CHUNK_SIZE = os.environ.get("HIGGS_TEXT_CHUNK_SIZE", "").strip()
+TEXT_CHUNK_MODE = os.environ.get("HIGGS_TEXT_CHUNK_MODE", "").strip()
 
-# Rewrite the mod's ALL-CAPS control tags into Higgs control tokens (see the
-# control-tag section below). HIGGS_CONTROL_TAGS=0 turns the rewrite off and
-# falls back to scrubbing tokens out entirely.
-CONTROL_TAGS_ENABLED = os.environ.get("HIGGS_CONTROL_TAGS", "1") != "0"
 
 # WINDOWS: ffmpeg is not a given on PATH the way it is in the image.
 FFMPEG = os.environ.get("HIGGS_FFMPEG", "").strip() or "ffmpeg"
@@ -160,7 +159,7 @@ SAMPLES_DIR = Path(os.environ.get("HIGGS_SAMPLES_DIR", str(HERE / "samples")))
 SAMPLES_ENABLED = os.environ.get("HIGGS_SAMPLES", "1") != "0"
 SAMPLE_EXTENSIONS = (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".opus")
 
-SERVER_PORT = int(os.environ.get("HIGGS_PORT", "7863"))
+SERVER_PORT = int(os.environ.get("HIGGS_PORT", "7860"))
 # WINDOWS: loopback by default. Set HIGGS_HOST=0.0.0.0 to reach it from the LAN.
 SERVER_HOST = os.environ.get("HIGGS_HOST", "127.0.0.1")
 
@@ -325,12 +324,6 @@ def preprocess_text(text: str) -> str:
     for zh, en in CHINESE_TO_ENGLISH_PUNCT.items():
         text = text.replace(zh, en)
     text = text.replace("°F", " degrees Fahrenheit").replace("°C", " degrees Celsius")
-    # Zonos speaker tags and sound-effect markers: Higgs has its own inline
-    # control-token vocabulary, but the mod's tags are not it -- strip them
-    # rather than reading them aloud (or worse, colliding with engine tags).
-    text = re.sub(r"\[SPEAKER\d+\]", " ", text)
-    text = re.sub(r"\[(laugh|cough|applause|cheering|music[^\]]*|humming[^\]]*|sing[^\]]*)\]",
-                  " ", text, flags=re.IGNORECASE)
     text = "\n".join(" ".join(line.split()) for line in text.split("\n") if line.strip())
     text = text.strip()
     if text and text[-1] not in ".!?,;\"'":
@@ -338,313 +331,12 @@ def preprocess_text(text: str) -> str:
     return text
 
 
-# --------------------------------------------------------------------------
-# Control tags
-#
-# Higgs v3 takes inline control tokens shaped `<|category:value|>`, but the mod
-# strips almost every special character before the line reaches us -- angle
-# brackets and pipes do not survive the trip. So the LLM is prompted to emit
-# ALL-CAPS tags mirroring the same category/value structure, and they are
-# rewritten here:
-#
-#     EMOTION-FEAR      ->  <|emotion:fear|>
-#     SFX-LAUGHTER      ->  <|sfx:laughter|>Haha,
-#     PROSODY-PAUSE     ->  <|prosody:pause|>
-#
-# The separator is optional and may be anything the mod leaves behind, so
-# EMOTION-FEAR, EMOTION_FEAR, EMOTION FEAR and EMOTIONFEAR all land the same
-# way. Matching is uppercase-only on purpose: "emotion" and "style" are
-# ordinary English words, and the caps requirement is what keeps a line of
-# dialogue from being mistaken for markup.
-#
-# Two rules from the model card drive the rest of this, and neither can be left
-# to the LLM:
-#
-#   * Emotion, style and the speed/pitch prosody tags are SENTENCE-LEVEL -- they
-#     colour a whole sentence and must sit at its start. A tag written mid-line
-#     is moved to the front of its sentence rather than emitted in place.
-#   * Sound effects are INLINE and must be immediately followed by onomatopoeia
-#     with no space; a bare `<|sfx:laughter|>` does nothing. The onomatopoeia is
-#     injected here.
-#
-# Anything shaped like a tag but not in the catalogue is deleted, never passed
-# through: unrecognised markup gets read aloud, and an NPC saying "emotion fear"
-# out loud is the one failure mode worth engineering against.
-# --------------------------------------------------------------------------
-
-TAG_CATALOG = {
-    "emotion": (
-        "affection", "amusement", "anger", "arousal", "awe", "bitterness",
-        "confusion", "contemplation", "contentment", "determination", "disgust",
-        "elation", "enthusiasm", "fear", "helplessness", "longing", "pride",
-        "relief", "sadness", "shame", "surprise",
-    ),
-    "prosody": (
-        "speed_very_slow", "speed_slow", "speed_fast", "speed_very_fast",
-        "pitch_low", "pitch_high", "expressive_high", "expressive_low",
-        "pause", "long_pause",
-    ),
-    "style": ("singing", "shouting", "whispering"),
-    "sfx": (
-        "cough", "laughter", "crying", "screaming", "burping", "humming",
-        "sigh", "sniff", "sneeze",
-    ),
-}
-
-# Inline tags stay where they were written; everything else is sentence-level.
-INLINE_VALUES = {"prosody": {"pause", "long_pause"}, "sfx": set(TAG_CATALOG["sfx"])}
-
-# Sound effects need onomatopoeia immediately after the token, and the model
-# card documents the spelling it was trained on for all nine -- these are its
-# words, not guesses. Where it lists two, the alternative is noted; swap it in if
-# an effect comes out wrong.
-ONOMATOPOEIA = {
-    "cough": "Ahem",
-    "laughter": "Hehe",      # or "Hehe"
-    "crying": "Sob",      # or "Sob"
-    "screaming": "Aaah",     # or "Ahh"
-    "burping": "Burp",
-    "humming": "Hmm",        # or "Mmm"
-    "sigh": "Ahh",           # or "Uh"
-    "sniff": "Sff",
-    "sneeze": "Achoo",
-}
-
-# Order sentence-level tokens are emitted in, matching the model card's own
-# stacking example (emotion first).
-_CATEGORY_ORDER = {"emotion": 0, "prosody": 1, "style": 2}
-
-_CATEGORY_RE = re.compile(
-    r"(?<![A-Za-z0-9])(EMOTION|PROSODY|STYLE|SFX)((?:[ \t\-_]*[A-Z]+){1,3})(?![A-Za-z])"
-)
-_WORD_RE = re.compile(r"[A-Z]+")
 _TOKEN_RE = re.compile(r"<\|[^|>]*\|>")
-_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
-
-
-def _squash(value: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", value.lower())
-
-
-# squashed spelling -> canonical value, so any surviving separator resolves.
-_TAG_LOOKUP = {cat: {_squash(v): v for v in vals} for cat, vals in TAG_CATALOG.items()}
-_VALID_TOKENS = {f"<|{c}:{v}|>" for c, vals in TAG_CATALOG.items() for v in vals}
-
-
-def _is_inline(category: str, value: str) -> bool:
-    return value in INLINE_VALUES.get(category, ())
-
-
-# Tokens the `language` channel may carry: that channel colours a whole line, so
-# an inline token arriving through it has no speech to sit between (see
-# _drop_unanchored_pauses).
-_SENTENCE_TOKENS = {f"<|{c}:{v}|>" for c, vals in TAG_CATALOG.items()
-                    for v in vals if not _is_inline(c, v)}
-
-# Whitespace is part of the match so a dropped token leaves no double space --
-# and no space between a sentence-level token and the word it colours.
-_PAUSE_RE = re.compile(
-    r"[ \t]*(?:" + "|".join(re.escape(f"<|prosody:{v}|>")
-                            for v in sorted(INLINE_VALUES["prosody"])) + r")[ \t]*"
-)
-
-
-def _drop_unanchored_pauses(line: str) -> str:
-    """Delete pause tokens that do not sit between two pieces of speech.
-
-    MEASURED, and the reason this function exists: a `<|prosody:long_pause|>` at
-    the very start or the very end of the engine input, separated from the words
-    by a space, makes the decoder generate until it hits its 2048-step cap
-    without ever emitting EOC. audio.cpp then fails the request outright with
-    "reached max_tokens before EOC" and returns no audio -- tens of seconds spent
-    to produce nothing, and repeated hits have been seen to take the engine down.
-    The same token *between* two words is fine, and the short `<|prosody:pause|>`
-    measured fine in every position; only long_pause on a line edge is fatal.
-    Both are dropped at the edges anyway, because:
-
-    dropping is what the tag means there anyway. A pause before the first word or
-    after the last one is silence at the edge of a clip nothing downstream wants. So
-    the LLM is free to write PROSODY-LONG PAUSE wherever it likes, and the ones
-    that would land on an edge are simply removed here.
-    """
-    def spoken(part: str) -> bool:
-        # Words, not characters: a trailing full stop is not something to pause
-        # after, and `_tidy` adds one to every line that lacks it.
-        return any(ch.isalnum() for ch in _TOKEN_RE.sub("", part))
-
-    def keep(match):
-        token = match.group(0).strip()
-        before, after = spoken(line[:match.start()]), spoken(line[match.end():])
-        if before and after:
-            return match.group(0)
-        logger.info(f"Dropping {token} with no speech "
-                    f"{'before' if not before else 'after'} it")
-        return ""
-    return _PAUSE_RE.sub(keep, line)
-
-
-def _dedupe(tags: list) -> list:
-    """One tag per competing group -- stacking two emotions is not meaningful."""
-    kept = {}
-    for category, value in tags:
-        group = (category, value.split("_")[0] if category == "prosody" else "")
-        kept.setdefault(group, (category, value))
-    return list(kept.values())
-
-
-def _render(tags: list) -> str:
-    ordered = sorted(_dedupe(tags), key=lambda t: (_CATEGORY_ORDER.get(t[0], 9), t[1]))
-    return "".join(f"<|{c}:{v}|>" for c, v in ordered)
-
-
-def _extract_tags(sentence: str) -> tuple[str, list]:
-    """Split one sentence into (text with inline tokens applied, sentence-level tags)."""
-    out: list[str] = []
-    sentence_level: list = []
-    pos = 0
-
-    # Scanned with search-from-pos rather than finditer: the pattern is greedy
-    # over up to three caps words but only the matched value is consumed, so the
-    # next tag can sit *inside* the previous match's span. finditer would resume
-    # past it and let it through into the spoken line.
-    while True:
-        match = _CATEGORY_RE.search(sentence, pos)
-        if match is None:
-            break
-        category = match.group(1).lower()
-        words = list(_WORD_RE.finditer(match.group(2)))
-
-        # Longest match wins: the regex may have swallowed following words, so
-        # try 3-word values before 1-word ones and consume only what matched.
-        value = None
-        end = match.end()
-        for count in range(len(words), 0, -1):
-            key = _squash("".join(w.group(0) for w in words[:count]))
-            if key in _TAG_LOOKUP[category]:
-                value = _TAG_LOOKUP[category][key]
-                end = match.start(2) + words[count - 1].end()
-                break
-
-        # The mod's prompt writes tags inside square brackets, so the brackets
-        # belong to the tag and leave with it. Left behind they are markup the
-        # engine reads aloud: an empty `[]` where a sentence-level tag was moved
-        # to the front, or a stray `]` wedged between an sfx token and the
-        # onomatopoeia that has to abut it.
-        start = match.start()
-        left = sentence[:start].rstrip()
-        if left.endswith("[") and len(left) - 1 >= pos:
-            start = len(left) - 1
-            after = sentence[end:]
-            trimmed = after.lstrip()
-            if trimmed.startswith("]"):
-                end += len(after) - len(trimmed) + 1
-
-        out.append(sentence[pos:start])
-
-        if value is None:
-            logger.warning(f"Dropping unrecognised control tag: {match.group(0)!r}")
-        elif category == "sfx":
-            sound = ONOMATOPOEIA[value]
-            rest = sentence[end:].lstrip()
-            if rest[:len(sound)].lower() == sound.lower():
-                # The line already carries its own onomatopoeia; just abut it.
-                out.append(f"<|sfx:{value}|>")
-                end += len(sentence[end:]) - len(rest)
-            else:
-                piece = f"<|sfx:{value}|>{sound}"
-                if rest and rest[0] not in ".,!?;:":
-                    piece += ","
-                out.append(piece)
-        elif _is_inline(category, value):
-            out.append(f"<|{category}:{value}|>")
-        else:
-            sentence_level.append((category, value))
-
-        pos = end
-
-    out.append(sentence[pos:])
-    return "".join(out), sentence_level
-
-
-def _scrub_tokens(text: str) -> str:
-    """Delete any `<|...|>` that is not a real Higgs tag, whoever wrote it."""
-    def keep(match):
-        if match.group(0) in _VALID_TOKENS:
-            return match.group(0)
-        logger.warning(f"Dropping unrecognised control token: {match.group(0)!r}")
-        return ""
-    return _TOKEN_RE.sub(keep, text)
-
-
-def _tidy(text: str) -> str:
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r" +([,.!?;:])", r"\1", text)
-    text = re.sub(r"([,;:])\1+", r"\1", text)
-    text = "\n".join(line.strip() for line in text.split("\n") if line.strip())
-    spoken = _TOKEN_RE.sub("", text).strip()
-    if spoken and spoken[-1] not in ".!?,;\"'":
-        text += "."
-    return text
-
-
-def apply_control_tags(text: str) -> str:
-    """Rewrite ALL-CAPS control tags into Higgs control tokens.
-
-    Runs *after* preprocess_text so punctuation and whitespace normalisation can
-    never reshape an emitted `<|...|>`.
-    """
-    if not CONTROL_TAGS_ENABLED:
-        return _tidy(_TOKEN_RE.sub("", text))
-
-    lines = []
-    for line in text.split("\n"):
-        carried: list = []       # tags from a sentence that turned out to be tag-only
-        rendered = []
-        for sentence in _SENTENCE_RE.split(line):
-            body, sentence_level = _extract_tags(sentence)
-            body = body.strip()
-            tags = carried + sentence_level
-            if not body:
-                # Nothing to colour -- hand the tags to the next sentence rather
-                # than emitting a token with no speech after it.
-                carried = tags
-                continue
-            carried = []
-            rendered.append(_render(tags) + body)
-        if carried and rendered:
-            rendered[-1] = _render(carried) + rendered[-1]
-        # Once the whole line is assembled -- and only then, since a pause at the
-        # end of one sentence is anchored by the next one.
-        lines.append(_drop_unanchored_pauses(" ".join(rendered)))
-
-    return _tidy(_scrub_tokens("\n".join(lines)))
 
 
 def strip_control_tokens(text: str) -> str:
     """What the model will actually speak -- tokens removed, for length maths."""
     return re.sub(r"[ \t]+", " ", _TOKEN_RE.sub("", text)).strip()
-
-
-def control_tag_from_field(value) -> str:
-    """Parse the Zonos `language` field as a sentence-level tag channel.
-
-    Accepts a real token (`<|emotion:anger|>`) or the caps form (`EMOTION-ANGER`),
-    and returns "" for anything else -- including the plain "en-us" the mod sends
-    by default. Inline tokens are ignored here whichever form they arrive in:
-    this channel prefixes the line, which is the one place a pause must never go.
-    """
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    valid = [t for t in _TOKEN_RE.findall(raw) if t in _SENTENCE_TOKENS]
-    if valid:
-        return "".join(valid)
-    _, sentence_level = _extract_tags(raw.upper())
-    if sentence_level:
-        return _render(sentence_level)
-    if "<" in raw and ">" in raw:
-        logger.warning(f"Language field {raw!r} is not a valid Higgs control token; ignoring")
-    return ""
 
 
 def expected_seconds(text: str) -> float:
@@ -681,7 +373,12 @@ class CapHitError(RuntimeError):
 
 def higgs_tts(text: str, ref_path: str | None, reference_text: str | None,
               top_p: float | None, seed: int | None,
-              max_tokens: int | None = None) -> bytes:
+              temperature: float | None = None,
+              top_k: int | None = None,
+              repetition_penalty: float | None = None,
+              max_tokens: int | None = None,
+              text_chunk_size: int | None = None,
+              text_chunk_mode: str | None = None) -> bytes:
     """POST /v1/audio/speech and return WAV bytes."""
     payload: dict = {
         "model": HIGGS_MODEL_ID,
@@ -698,10 +395,31 @@ def higgs_tts(text: str, ref_path: str | None, reference_text: str | None,
         payload["top_p"] = top_p
     if seed is not None:
         payload["seed"] = seed
-    if AUDIO_TEMPERATURE:
+
+    if temperature is not None:
+        payload["temperature"] = temperature
+    elif AUDIO_TEMPERATURE:
         payload["temperature"] = float(AUDIO_TEMPERATURE)
-    if AUDIO_TOP_K:
+
+    if top_k is not None:
+        payload["top_k"] = top_k
+    elif AUDIO_TOP_K:
         payload["top_k"] = int(AUDIO_TOP_K)
+
+    if repetition_penalty is not None:
+        payload["repetition_penalty"] = repetition_penalty
+    elif AUDIO_REPETITION_PENALTY:
+        payload["repetition_penalty"] = float(AUDIO_REPETITION_PENALTY)
+
+    if text_chunk_size is not None:
+        payload["text_chunk_size"] = text_chunk_size
+    elif TEXT_CHUNK_SIZE:
+        payload["text_chunk_size"] = int(TEXT_CHUNK_SIZE)
+
+    if text_chunk_mode is not None:
+        payload["text_chunk_mode"] = text_chunk_mode
+    elif TEXT_CHUNK_MODE:
+        payload["text_chunk_mode"] = TEXT_CHUNK_MODE
 
     response = requests.post(f"{HIGGS_URL}/v1/audio/speech", json=payload,
                              timeout=HIGGS_REQUEST_TIMEOUT)
@@ -743,25 +461,88 @@ def trim_trailing_silence(data: bytes) -> tuple[bytes, float]:
         if n_win < 2:
             return data, 0.0
         energies = np.sqrt((x[:n_win * win].reshape(n_win, win) ** 2).mean(axis=1))
-        loud = np.flatnonzero(energies > TRIM_THRESHOLD * energies.max())
+        max_e = energies.max()
+        loud = np.flatnonzero(energies > TRIM_THRESHOLD * max_e)
         if loud.size == 0:
             return data, 0.0
 
-        keep = min(x.size, int((loud[-1] + 1) * win + TRIM_TAIL_PAD_S * rate))
+        last_loud_win = loud[-1]
+
+        # Detect post-speech EOS noise pops/bursts (an isolated noise burst <= 350ms
+        # occurring after a silence gap >= 80ms following main speech).
+        is_quiet = energies < (0.015 * max_e)
+        q_end = last_loud_win
+        while q_end >= 0 and not is_quiet[q_end]:
+            q_end -= 1
+        if q_end >= 0:
+            q_start = q_end
+            while q_start >= 0 and is_quiet[q_start]:
+                q_start -= 1
+            quiet_len = q_end - q_start
+            if quiet_len >= 4 and (last_loud_win - q_end) * win / rate <= 0.35:
+                main_speech = loud[loud <= q_start]
+                if main_speech.size > 0:
+                    last_loud_win = main_speech[-1]
+
+        keep = min(x.size, int((last_loud_win + 1) * win + TRIM_TAIL_PAD_S * rate))
         removed = (x.size - keep) / rate
-        if removed < 0.10:          # not worth rewriting the file
-            return data, 0.0
+        logger.info(f"Trim silence: input {x.size/rate:.2f}s -> kept {keep/rate:.2f}s (removed {removed:.3f}s)")
+        # Apply a 10ms micro fade-out at the tail to eliminate PCM DC-offset clicks and pops
+        fade_samples = min(int(0.010 * rate), keep)
+        if fade_samples > 0:
+            fade = np.linspace(1.0, 0.0, fade_samples, dtype=np.float32)
+            x[keep - fade_samples : keep] *= fade
+
+        out_pcm = (x[:keep] * 32767.0).clip(-32768, 32767).astype("<i2").tobytes()
 
         out = io.BytesIO()
         with wave.open(out, "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
             w.setframerate(rate)
-            w.writeframes(frames[: keep * 2])
+            w.writeframes(out_pcm)
         return out.getvalue(), removed
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Silence trim skipped: {exc}")
         return data, 0.0
+
+
+def truncate_runaway_audio(data: bytes, max_allowed_s: float) -> tuple[bytes, bool]:
+    """Truncate runaway audio (e.g. repetition loops) and apply a 0.5s fade-out."""
+    try:
+        with wave.open(io.BytesIO(data)) as w:
+            if w.getsampwidth() != 2 or w.getnchannels() != 1:
+                return data, False
+            rate = w.getframerate()
+            n_frames = w.getnframes()
+            dur = n_frames / rate
+            if dur <= max_allowed_s:
+                return data, False
+            frames = w.readframes(n_frames)
+
+        x = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+        target_len = int(max_allowed_s * rate)
+        if target_len >= x.size:
+            return data, False
+
+        # Apply a 0.5-second linear fade-out at the end
+        fade_len = min(int(0.5 * rate), target_len)
+        if fade_len > 0:
+            fade = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+            x[target_len - fade_len:target_len] *= fade
+
+        out_pcm = (x[:target_len] * 32767.0).clip(-32768, 32767).astype("<i2").tobytes()
+
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(out_pcm)
+        return out.getvalue(), True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Runaway audio truncation skipped: {exc}")
+        return data, False
 
 
 # --------------------------------------------------------------------------
@@ -924,12 +705,62 @@ def is_ping(text) -> bool:
     return bool(PING_TEXT) and str(text or "").strip().lower() == PING_TEXT
 
 
-def log_request(params: dict) -> None:
-    """Log every parameter of an incoming request, in Zonos order."""
-    fields = ", ".join(
-        f"{name}={_describe_param(params.get(name))}" for name in INPUT_NAMES
-    )
-    logger.info(f"Incoming request: {fields}")
+def log_request(
+    params: dict,
+    temperature_val: float | None = None,
+    top_p_val: float | None = None,
+    top_k_val: int | None = None,
+    rep_pen_val: float | None = None,
+    chunk_size_val: int | None = None,
+    chunk_mode_val: str | None = None,
+    seed_val: int | None = None,
+) -> None:
+    """Log only the parameters that Higgs Audio TTS actually uses."""
+    parts = []
+    text = params.get("text")
+    if text:
+        parts.append(f"text={_describe_param(text)}")
+
+    speaker_audio = params.get("speaker_audio")
+    if speaker_audio is not None:
+        parts.append(f"speaker_audio={_describe_param(speaker_audio)}")
+
+    language = params.get("language")
+    if language:
+        parts.append(f"language={_describe_param(language)}")
+
+    if temperature_val is not None:
+        parts.append(f"temperature={temperature_val}")
+    elif AUDIO_TEMPERATURE:
+        parts.append(f"temperature={AUDIO_TEMPERATURE} (env)")
+
+    if top_p_val is not None:
+        parts.append(f"top_p={top_p_val}")
+
+    if top_k_val is not None:
+        parts.append(f"top_k={top_k_val}")
+    elif AUDIO_TOP_K:
+        parts.append(f"top_k={AUDIO_TOP_K} (env)")
+
+    if rep_pen_val is not None:
+        parts.append(f"repetition_penalty={rep_pen_val}")
+    elif AUDIO_REPETITION_PENALTY:
+        parts.append(f"repetition_penalty={AUDIO_REPETITION_PENALTY} (env)")
+
+    if chunk_size_val is not None:
+        parts.append(f"text_chunk_size={chunk_size_val}")
+    elif TEXT_CHUNK_SIZE:
+        parts.append(f"text_chunk_size={TEXT_CHUNK_SIZE} (env)")
+
+    if chunk_mode_val is not None:
+        parts.append(f"text_chunk_mode={chunk_mode_val}")
+    elif TEXT_CHUNK_MODE:
+        parts.append(f"text_chunk_mode={TEXT_CHUNK_MODE} (env)")
+
+    if seed_val is not None:
+        parts.append(f"seed={seed_val}")
+
+    logger.info(f"Incoming request: {', '.join(parts)}")
 
 
 def _resolve_upload(speaker_audio) -> str | None:
@@ -1019,40 +850,25 @@ def generate_audio(
     dnsmos_overall,            # 17 ignored
     denoise_speaker,           # 18 ignored
     cfg_scale,                 # 19 ignored
-    top_p,                     # 20 used
-    min_k,                     # 21 ignored
-    min_p,                     # 22 ignored
-    linear,                    # 23 ignored
-    confidence,                # 24 ignored
-    quadratic,                 # 25 ignored
-    seed,                      # 26 used
+    top_p,                     # 20 used (top_p)
+    min_k,                     # 21 used (top_k)
+    min_p,                     # 22 used (repetition_penalty)
+    linear,                    # 23 used (temperature - sent by SkyrimNet HiggsInterface)
+    confidence,                # 24 used (text_chunk_size)
+    quadratic,                 # 25 used (text_chunk_mode)
+    seed,                      # 26 used (seed)
     randomize_seed,            # 27 ignored
     unconditional_keys,        # 28 ignored
 ):
     """Zonos-compatible entry point. Returns a path to a completed WAV."""
     request_start = time.time()
 
-    # First statement, so locals() is exactly the 29 inputs -- and so a request
-    # rejected below (empty text, no reference) is still logged as it arrived.
-    log_request(locals())
-
     if not text or not str(text).strip():
         logger.error("Empty text provided")
         return None
 
-    # The mod's ALL-CAPS tags become Higgs control tokens here, after
-    # normalisation so punctuation and whitespace handling cannot reshape a
-    # token. `processed_text` then drops back to just the spoken words, because
-    # every length-derived heuristic below (token budget, ICL-collapse check)
-    # must measure speech and not markup.
-    tagged_text = apply_control_tags(preprocess_text(str(text)))
-    processed_text = strip_control_tokens(tagged_text)
-
-    # The Zonos language field is dead weight here (Higgs takes no language
-    # input), so it is reused as a sentence-level tag channel: a valid token or
-    # caps tag is prepended to the line, while a plain "en-us" is ignored.
-    emotion_tag = control_tag_from_field(language)
-    engine_text = emotion_tag + tagged_text
+    engine_text = preprocess_text(str(text))
+    processed_text = strip_control_tokens(engine_text)
 
     if not processed_text:
         logger.error("Nothing left to speak after preprocessing")
@@ -1095,6 +911,37 @@ def generate_audio(
     except (TypeError, ValueError):
         top_p_value = None
 
+    # SkyrimNet HiggsInterface passes configured temperature in slot 23 ('linear')
+    try:
+        temp_val = float(linear) if linear is not None else None
+        temperature_value = temp_val if temp_val is not None and temp_val > 0.0 else None
+    except (TypeError, ValueError):
+        temperature_value = None
+
+    # Slot 21 ('min_k') is top_k if specified
+    try:
+        top_k_val = int(min_k) if min_k is not None else None
+        top_k_value = top_k_val if top_k_val is not None and top_k_val >= 0 else None
+    except (TypeError, ValueError):
+        top_k_value = None
+
+    # Slot 22 ('min_p') is repetition_penalty if specified
+    try:
+        rep_val = float(min_p) if min_p is not None else None
+        repetition_penalty_value = rep_val if rep_val is not None and rep_val > 0.0 else None
+    except (TypeError, ValueError):
+        repetition_penalty_value = None
+
+    # Slot 24 ('confidence') is text_chunk_size if specified
+    try:
+        chunk_sz = int(confidence) if confidence is not None else None
+        text_chunk_size_value = chunk_sz if chunk_sz is not None and chunk_sz > 0 else None
+    except (TypeError, ValueError):
+        text_chunk_size_value = None
+
+    # Slot 25 ('quadratic') is text_chunk_mode if specified
+    text_chunk_mode_value = str(quadratic).strip() if quadratic and str(quadratic).strip() not in ("False", "True", "None", "") else None
+
     seed_value = None
     if seed:
         try:
@@ -1104,40 +951,87 @@ def generate_audio(
         except (TypeError, ValueError):
             seed_value = None
 
+    log_request(
+        locals(),
+        temperature_val=temperature_value,
+        top_p_val=top_p_value,
+        top_k_val=top_k_value,
+        rep_pen_val=repetition_penalty_value,
+        chunk_size_val=text_chunk_size_value,
+        chunk_mode_val=text_chunk_mode_value,
+        seed_val=seed_value,
+    )
+
     try:
         gen_start = time.time()
         budget = token_budget(processed_text)
-        try:
-            audio_bytes = higgs_tts(engine_text, ref, transcript,
-                                    top_p_value, seed_value,
-                                    max_tokens=budget)
-        except CapHitError:
-            # A cap hit returns no audio at all, so the retry is free to change
-            # the request -- there is nothing left to preserve. What it changes
-            # depends on what could plausibly have caused the hit:
-            #
-            #   * A text-derived budget below the ceiling is the prime suspect.
-            #     Same text, ceiling budget.
-            #   * With the budget off (the default) the cap that was hit is the
-            #     engine's own 2048, so re-sending at MAX_TOKEN_CEIL would be
-            #     the *identical request* and fail identically -- 11 s for
-            #     nothing. Control tokens are the measured runaway trigger, so
-            #     the retry drops them and speaks the plain line.
-            #   * With neither in play, only the sample itself is left to
-            #     change: retry seedless and let the engine draw a new one.
-            if budget is not None and budget < MAX_TOKEN_CEIL:
-                retry_text, retry_seed, why = (
-                    engine_text, seed_value, f"budget {budget} -> {MAX_TOKEN_CEIL}")
-            elif engine_text != processed_text:
-                retry_text, retry_seed, why = (
-                    processed_text, seed_value, "dropping control tokens")
-            else:
-                retry_text, retry_seed, why = (
-                    engine_text, None, "re-rolling the seed")
-            logger.warning(f"max_tokens hit before EOC; retrying once ({why})")
-            audio_bytes = higgs_tts(retry_text, ref, transcript,
-                                    top_p_value, retry_seed,
-                                    max_tokens=MAX_TOKEN_CEIL)
+
+        attempts = []
+
+        def add_attempt(text_arg: str, seed_arg: int | None, transcript_arg: str | None, max_tokens_arg: int | None, why_arg: str) -> None:
+            cand = {
+                "text": text_arg,
+                "seed": seed_arg,
+                "transcript": transcript_arg,
+                "max_tokens": max_tokens_arg,
+                "why": why_arg,
+            }
+            for prev in attempts:
+                if (prev["text"] == cand["text"] and
+                    prev["seed"] == cand["seed"] and
+                    prev["transcript"] == cand["transcript"] and
+                    prev["max_tokens"] == cand["max_tokens"]):
+                    return
+            attempts.append(cand)
+
+        # Attempt 1: stock request with calculated budget
+        add_attempt(engine_text, seed_value, transcript, budget,
+                    f"initial request (budget={budget})" if budget else "initial request")
+
+        # Fallback 1: ceiling budget if initial budget was lower
+        if budget is not None and budget < MAX_TOKEN_CEIL:
+            add_attempt(engine_text, seed_value, transcript, MAX_TOKEN_CEIL,
+                        f"budget {budget} -> {MAX_TOKEN_CEIL}")
+
+        # Fallback 2: drop control tokens if present
+        if engine_text != processed_text:
+            add_attempt(processed_text, seed_value, transcript, MAX_TOKEN_CEIL,
+                        "dropping control tokens")
+
+        # Fallback 3: re-roll / clear seed
+        add_attempt(processed_text, None, transcript, MAX_TOKEN_CEIL,
+                    "re-rolling the seed")
+
+        # Fallback 4: drop transcript if reference transcript was used
+        if transcript is not None:
+            add_attempt(processed_text, None, None, MAX_TOKEN_CEIL,
+                        "dropping transcript & re-rolling seed")
+
+        audio_bytes = None
+        last_cap_hit = None
+
+        for i, attempt in enumerate(attempts):
+            if i > 0:
+                logger.warning(f"max_tokens hit before EOC; retrying ({attempt['why']})")
+            try:
+                audio_bytes = higgs_tts(attempt["text"], ref, attempt["transcript"],
+                                        top_p_value, attempt["seed"],
+                                        temperature=temperature_value,
+                                        top_k=top_k_value,
+                                        repetition_penalty=repetition_penalty_value,
+                                        text_chunk_size=text_chunk_size_value,
+                                        text_chunk_mode=text_chunk_mode_value,
+                                        max_tokens=attempt["max_tokens"])
+                break
+            except CapHitError as exc:
+                last_cap_hit = exc
+                continue
+
+        if audio_bytes is None:
+            if last_cap_hit:
+                raise last_cap_hit
+            raise RuntimeError("Audio generation yielded no bytes")
+
         gen_s = time.time() - gen_start
     except Exception as exc:  # noqa: BLE001
         logger.exception(f"Generation failed: {exc}")
@@ -1146,6 +1040,8 @@ def generate_audio(
     trimmed = 0.0
     if TRIM_SILENCE:
         audio_bytes, trimmed = trim_trailing_silence(audio_bytes)
+    else:
+        logger.info("Trim silence: disabled (TRIM_SILENCE=0)")
 
     try:
         duration, sample_rate = wav_duration(audio_bytes)
@@ -1168,7 +1064,13 @@ def generate_audio(
         )
         _TRANSCRIPT_CACHE.pop(digest, None)
         try:
-            audio_bytes = higgs_tts(engine_text, ref, None, top_p_value, seed_value,
+            audio_bytes = higgs_tts(engine_text, ref, None,
+                                    top_p_value, seed_value,
+                                    temperature=temperature_value,
+                                    top_k=top_k_value,
+                                    repetition_penalty=repetition_penalty_value,
+                                    text_chunk_size=text_chunk_size_value,
+                                    text_chunk_mode=text_chunk_mode_value,
                                     max_tokens=budget)
             if TRIM_SILENCE:
                 audio_bytes, trimmed = trim_trailing_silence(audio_bytes)
@@ -1181,6 +1083,16 @@ def generate_audio(
             f"Short output: {duration:.2f}s for {len(processed_text)} chars "
             f"(expected ~{expected:.1f}s)"
         )
+
+    max_allowed = max(10.0, expected * 2.2 + 3.0)
+    if expected >= 0.5 and duration > max_allowed:
+        logger.warning(
+            f"Runaway repetition loop detected ({duration:.2f}s audio for expected ~{expected:.1f}s, cap {max_allowed:.1f}s); "
+            f"truncating and fading out."
+        )
+        audio_bytes, truncated = truncate_runaway_audio(audio_bytes, max_allowed)
+        if truncated:
+            duration, sample_rate = wav_duration(audio_bytes)
 
     # The engine returns 16-bit PCM at 24 kHz mono -- exactly what the mod
     # already consumes -- so the bytes go straight to disk.
@@ -1204,35 +1116,35 @@ def generate_audio(
 # --------------------------------------------------------------------------
 
 api_inputs = [
-    gr.Textbox(label="Model"),                                          # 0
+    gr.Textbox(label="Model", value="higgs"),                           # 0
     gr.Textbox(label="Text"),                                           # 1
-    gr.Textbox(label="Language"),                                       # 2
+    gr.Textbox(label="Language", value="en-us"),                        # 2
     gr.File(label="Speaker Audio"),                                     # 3
-    gr.File(label="Prefix Audio"),                                      # 4
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Happiness"),     # 5
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Sadness"),       # 6
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Disgust"),       # 7
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Fear"),          # 8
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Surprise"),      # 9
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Anger"),         # 10
-    gr.Slider(minimum=0, maximum=1, value=0.05, label="Other"),         # 11
-    gr.Slider(minimum=0, maximum=1, value=0.2, label="Neutral"),        # 12
-    gr.Slider(minimum=0.5, maximum=1.0, value=0.7, label="VQ Score"),   # 13
-    gr.Slider(minimum=20000, maximum=25000, value=24000, label="Fmax (Hz)"),  # 14
-    gr.Slider(minimum=20, maximum=150, value=45, label="Pitch Std"),    # 15
-    gr.Slider(minimum=0, maximum=50, value=14.6, label="Speaking Rate"),  # 16
-    gr.Slider(minimum=1, maximum=5, value=4, label="DNSMOS Overall"),   # 17
-    gr.Checkbox(value=True, label="Denoise Speaker"),                   # 18
-    gr.Slider(minimum=1, maximum=10, value=3, label="CFG Scale"),       # 19
-    gr.Slider(minimum=0.1, maximum=1.0, value=0.9, label="Top P"),      # 20
-    gr.Slider(minimum=1, maximum=100, value=1, label="Min K"),          # 21
-    gr.Slider(minimum=0.01, maximum=1.0, value=0.2, label="Min P"),     # 22
-    gr.Checkbox(value=False, label="Linear"),                           # 23
-    gr.Slider(minimum=0, maximum=1, value=0.7, label="Confidence"),     # 24
-    gr.Checkbox(value=False, label="Quadratic"),                        # 25
+    gr.File(label="Prefix Audio", visible=False),                       # 4
+    gr.Slider(minimum=0, maximum=1, value=0.05, label="Happiness", visible=False),     # 5
+    gr.Slider(minimum=0, maximum=1, value=0.05, label="Sadness", visible=False),       # 6
+    gr.Slider(minimum=0, maximum=1, value=0.05, label="Disgust", visible=False),       # 7
+    gr.Slider(minimum=0, maximum=1, value=0.05, label="Fear", visible=False),          # 8
+    gr.Slider(minimum=0, maximum=1, value=0.05, label="Surprise", visible=False),      # 9
+    gr.Slider(minimum=0, maximum=1, value=0.05, label="Anger", visible=False),         # 10
+    gr.Slider(minimum=0, maximum=1, value=0.05, label="Other", visible=False),         # 11
+    gr.Slider(minimum=0, maximum=1, value=0.2, label="Neutral", visible=False),        # 12
+    gr.Slider(minimum=0.5, maximum=1.0, value=0.7, label="VQ Score", visible=False),   # 13
+    gr.Slider(minimum=20000, maximum=25000, value=24000, label="Fmax (Hz)", visible=False),  # 14
+    gr.Slider(minimum=20, maximum=150, value=45, label="Pitch Std", visible=False),    # 15
+    gr.Slider(minimum=0, maximum=50, value=14.6, label="Speaking Rate", visible=False),  # 16
+    gr.Slider(minimum=1, maximum=5, value=4, label="DNSMOS Overall", visible=False),   # 17
+    gr.Checkbox(value=True, label="Denoise Speaker", visible=False),                   # 18
+    gr.Slider(minimum=1, maximum=10, value=3, label="CFG Scale", visible=False),       # 19
+    gr.Slider(minimum=0.1, maximum=1.0, value=0.8, step=0.01, label="Top P"),          # 20
+    gr.Slider(minimum=0, maximum=100, value=30, step=1, label="Top K"),                # 21 (min_k slot)
+    gr.Slider(minimum=1.0, maximum=2.0, value=1.1, step=0.01, label="Repetition Penalty"), # 22 (min_p slot)
+    gr.Slider(minimum=0.05, maximum=2.0, value=0.8, step=0.05, label="Temperature"),  # 23 (linear slot)
+    gr.Number(value=1024, label="Text Chunk Size"),                     # 24 (confidence slot)
+    gr.Textbox(value="default", label="Text Chunk Mode"),               # 25 (quadratic slot)
     gr.Number(value=123, label="Seed"),                                 # 26
-    gr.Checkbox(value=False, label="Randomize Seed"),                   # 27
-    gr.Textbox(value="[]", label="Unconditional Keys"),                 # 28
+    gr.Checkbox(value=False, label="Randomize Seed", visible=False),                   # 27
+    gr.Textbox(value="[]", label="Unconditional Keys", visible=False),                 # 28
 ]
 
 

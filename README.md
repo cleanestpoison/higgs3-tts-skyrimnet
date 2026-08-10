@@ -77,16 +77,11 @@ runs. Measured on one 8.87 s clip, this lifts the 8–12 kHz band from 0.01 % to
 1.05 % of total energy — the sibilance and air the 16 kHz path removes.
 
 See `samples\README.md` for what makes a good clip. Set `$HIGGS_SAMPLES = 0` to
-always use whatever the mod sends.
+always use whatever the mod sends. 
 
 ## Control tags
 
-Higgs v3 takes control tokens shaped `<|category:value|>` — 43 of them, across
-emotion (21), prosody (10), style (3) and sound effects (9). SkyrimNet strips
-almost every special character before a line reaches the TTS, so angle brackets
-and pipes never survive the trip. The LLM is therefore prompted to write
-**ALL-CAPS tags in square brackets** mirroring the same structure, and the
-wrapper rewrites them:
+Higgs v3 takes control tokens shaped `<|category:value|>` — 43 of them, across emotion (21), prosody (10), style (3) and sound effects (9). SkyrimNet produces and consumes tags as square bracket syntax `[category-value]` and transforms it to higgs syntax internally:
 
 | written by the LLM | sent to the engine |
 | --- | --- |
@@ -98,45 +93,16 @@ wrapper rewrites them:
 
 ### Wiring the tags up in SkyrimNet
 
-Two files in this repo do this, and all three steps are needed — tags will not
-work with any one of them missing.
+You pretty much need jsut to select Higgs as your tts and you are done.
+One setting you might find optional is **Propagate Sentence Tags** it is enabled by default. When LLM returns multiple sentence for single dialogue SkyrimNet will divide it into segments. Usually higgs sentence level tags are present at the very beginning of first sentence. When it splits into multiple segments 2nd+ segment will loose those tags. This config allows to carry them over to subsequent segments.
 
-**1. Select Chatterbox as the TTS system.**
 
-In SkyrimNet's settings, set the TTS system to **Chatterbox**. This wrapper
-serves the Zonos API, but the tag pipeline rides on SkyrimNet's Chatterbox
-integration — that is the backend with an audio-tags feature and a configurable
-allowed-tag list, which is what makes the rest of this possible. It is also why
-[`0650_audio_tags.prompt`](0650_audio_tags.prompt) branches on
-`get_actor_tts(npc.UUID) == "chatterbox"`.
+**1. Select Higgs as the TTS system.**
+In SkyrimNet's settings, set the TTS system to **Higgs**. This wrapper serves the Zonos API, but the tag pipeline now rides on SkyrimNet's Higgs integration — that is the backend with an audio-tags feature and a configurable allowed-tag list.
 
 **2. Enable audio tags and register the allowed list.**
 
-In the Chatterbox settings, turn **audio tags on**. Then under **Advanced
-settings**, paste in the tags from
-[`skyrimnet-allowed-audiotags-chatterbox.md`](skyrimnet-allowed-audiotags-chatterbox.md)
-— one per line, exactly as they appear in that file. SkyrimNet drops anything not
-on this list before it ever reaches the TTS, so a tag missing here simply never
-arrives.
-
-**3. Install the prompt.**
-
-Copy [`0650_audio_tags.prompt`](0650_audio_tags.prompt) to:
-
-```
-submodules/user_final_instructions/0650_audio_tags.prompt
-```
-
-overwriting the original file. This is what instructs the LLM to write the tags
-in the first place.
-
-> **Not every supported tag is included.** The lists here are a deliberate
-> subset — some of Higgs v3's tags performed noticeably worse than others in
-> practice and were left out rather than shipped as unreliable. The full
-> catalogue is on the model card:
-> [bosonai/higgs-tts-3-4b](https://huggingface.co/bosonai/higgs-tts-3-4b).
-> Add any of them back to both files if they work better for you than they did
-> here.
+Higgs config has tags enabled by default. All [higgs supported tags](https://huggingface.co/bosonai/higgs-tts-3-4b#control-tokens) are included by default. Some of them distort voice too much, so if you see major changes in cloned voice go and check what tags were used and remove them from allowed tags config.
 
 ## Credit
 
