@@ -187,20 +187,7 @@ while running, though; this one wants ~6 GB.
 Optional, but it is most of what makes this worth running. Three steps, all
 required:
 
-1. **Set the TTS system to Chatterbox** in SkyrimNet's settings. The wrapper
-   serves the Zonos API, but the tag pipeline rides on SkyrimNet's Chatterbox
-   integration — that is the backend with an audio-tags feature and a
-   configurable allowed-tag list.
-
-2. **Enable audio tags** in the Chatterbox settings, then under **Advanced
-   settings** paste in every tag from
-   [`skyrimnet-allowed-audiotags-chatterbox.md`](skyrimnet-allowed-audiotags-chatterbox.md),
-   one per line exactly as written. SkyrimNet discards anything not on this list
-   before it reaches the TTS.
-
-3. **Copy [`0650_audio_tags.prompt`](0650_audio_tags.prompt)** to
-   `submodules/user_final_instructions/0650_audio_tags.prompt`, overwriting the
-   original.
+1. **Set the TTS system to Higgs**
 
 The included tags are a deliberate subset — some of Higgs v3's tags worked
 noticeably worse than others and were left out. The full catalogue is on the
