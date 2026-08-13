@@ -6,15 +6,13 @@
 
 # --- Networking -------------------------------------------------------------
 
-# Port SkyrimNet points at. 7860 is left to OmniTTS, 7861 to Qwen3-TTS and 7862
-# to skyrimnet-pocket-tts, so they can all run together and you switch by
-# changing SkyrimNet's TTS URL.
-# SkyrimNet TTS URL:  http://127.0.0.1:7863
-$HIGGS_PORT = 7863
+# Port SkyrimNet points at.
+# SkyrimNet TTS URL:  http://127.0.0.1:7860
+$HIGGS_PORT = 7860
 
 # Interface the wrapper binds. Loopback keeps it off the LAN and avoids a
 # Windows Firewall prompt. Use "0.0.0.0" only if SkyrimNet runs on another PC.
-$HIGGS_HOST = "127.0.0.1"
+$HIGGS_HOST = "0.0.0.0"
 
 # The audio.cpp engine. Loopback only -- nothing but the wrapper should reach
 # it. 8081 is deliberately avoided: SkyrimSE itself listens there.
