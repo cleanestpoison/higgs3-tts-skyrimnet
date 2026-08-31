@@ -49,7 +49,8 @@ $DlDir = Join-Path $Here "dl"
 $AudioCppTag = "release-0.4.2"
 $AudioCppBuild = "27d87ba"
 $AudioCppBase = "https://github.com/0xShug0/audio.cpp/releases/download/$AudioCppTag"
-$ModelUrl = "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Higgs-Audio-v3-TTS-4B-GGUF/higgs-audio-v3-tts-4b-q8_0.gguf"
+$ModelRepo = "audio-cpp/audio.cpp-gguf"
+$ModelRepoFile = "Higgs-Audio-v3-TTS-4B-GGUF/higgs-audio-v3-tts-4b-q8_0.gguf"
 
 function Write-Step($msg) { Write-Host "`n=== $msg" -ForegroundColor Cyan }
 function Write-Ok($msg) { Write-Host "  [ok] $msg" -ForegroundColor Green }
@@ -105,6 +106,99 @@ function Get-RemoteFile {
     Write-Ok "$Label downloaded"
 }
 
+# Model downloads require the Hugging Face CLI plus hf-xet for high-speed
+# transfers. Install both into Python 3.12's per-user site when the command is
+# missing, then expose that Python Scripts directory to this setup process.
+function Ensure-HuggingFaceCli {
+    $hf = Get-Command hf -ErrorAction SilentlyContinue
+    if ($hf) {
+        Write-Ok "Hugging Face CLI available ($($hf.Source))"
+        return
+    }
+
+    Write-Warn "Hugging Face CLI ('hf') is not installed or not on PATH."
+    $answer = Read-Host "  Install hf and hf-xet now? [Y/n]"
+    if ($answer -and $answer -notmatch '^[Yy]') {
+        throw "Hugging Face CLI is required to download the model. Re-run setup and approve its installation."
+    }
+
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if (-not $pyLauncher) {
+        throw "Python launcher ('py') not found. Install Python 3.12, then re-run setup."
+    }
+
+    $pythonProbe = Invoke-Probe $pyLauncher.Source @("-3.12", "-c", "import sys; print(sys.executable)")
+    if (-not $pythonProbe.Ok) {
+        throw "Python 3.12 not found. Install it from python.org, then re-run setup."
+    }
+
+    Write-Host "  installing Hugging Face CLI and fast-transfer support" -ForegroundColor DarkGray
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $pyLauncher.Source -3.12 -m pip install --user --upgrade huggingface_hub hf_xet
+        $installCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousEap
+    }
+    if ($installCode -ne 0) { throw "Failed to install the Hugging Face CLI and hf-xet." }
+
+    $scriptsProbe = Invoke-Probe $pyLauncher.Source @(
+        "-3.12", "-c", "import sysconfig; print(sysconfig.get_path('scripts')); print(sysconfig.get_path('scripts', scheme='nt_user'))"
+    )
+    if (-not $scriptsProbe.Ok) { throw "Could not locate Python's Scripts directories after installing hf." }
+    $scriptDirs = @($scriptsProbe.Output -split "`r?`n" | Where-Object { $_ } | Select-Object -Unique)
+    foreach ($scriptDir in $scriptDirs) {
+        if (($env:Path -split ';') -notcontains $scriptDir) {
+            $env:Path = "$scriptDir;$env:Path"
+        }
+    }
+
+    $hf = Get-Command hf -ErrorAction SilentlyContinue
+    if (-not $hf) {
+        throw "hf was installed, but its command could not be found in Python's Scripts directories. Open a new terminal and re-run setup."
+    }
+    Write-Ok "Hugging Face CLI installed ($($hf.Source))"
+}
+
+# Download a single Hub file with the Hugging Face CLI. Modern versions use
+# hf-xet automatically; high-performance mode increases concurrency and uses
+# as much available network and disk bandwidth as possible. --local-dir keeps
+# partial-download metadata so an interrupted setup can resume efficiently.
+function Get-HuggingFaceFile {
+    param([string]$Repo, [string]$RepoFile, [string]$OutFile, [string]$Label)
+
+    if (Test-Path $OutFile) { Write-Ok "$Label already present"; return }
+
+    $hf = Get-Command hf -ErrorAction SilentlyContinue
+    if (-not $hf) {
+        throw "Hugging Face CLI ('hf') is unavailable even though the prerequisite check passed. Re-run setup."
+    }
+
+    $outDir = Split-Path -Parent $OutFile
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    Write-Host "  downloading $Label with hf (Xet high-performance mode)" -ForegroundColor DarkGray
+
+    $previousXetMode = $env:HF_XET_HIGH_PERFORMANCE
+    $previousEap = $ErrorActionPreference
+    $env:HF_XET_HIGH_PERFORMANCE = "1"
+    $ErrorActionPreference = "Continue"
+    try {
+        & $hf.Source download $Repo $RepoFile --local-dir $outDir
+        if ($LASTEXITCODE -ne 0) { throw "hf download failed ($Label). Re-run to resume." }
+    } finally {
+        $ErrorActionPreference = $previousEap
+        $env:HF_XET_HIGH_PERFORMANCE = $previousXetMode
+    }
+
+    $downloadedFile = Join-Path $outDir ($RepoFile -replace '/', '\')
+    if (-not (Test-Path $downloadedFile)) {
+        throw "hf reported success, but the downloaded model was not found at $downloadedFile."
+    }
+    Move-Item -Force $downloadedFile $OutFile
+    Write-Ok "$Label downloaded"
+}
+
 # Unpack a release zip over engine\. The zips have varied between a flat layout
 # and a single wrapper folder, so descend through any lone top-level directory
 # rather than assuming either shape.
@@ -128,6 +222,9 @@ function Expand-IntoEngine {
 
 Write-Host "Higgs Audio v3 TTS setup" -ForegroundColor White
 Write-Host "Installing into: $Here"
+
+Write-Step "Checking Hugging Face CLI"
+Ensure-HuggingFaceCli
 
 # --- 1. GPU check -----------------------------------------------------------
 # The engine is built CUDA-only in this package. It can fall back to
@@ -198,8 +295,8 @@ Write-Ok "audiocpp_server.exe runs and resolves its DLLs"
 
 Write-Step "Checking model weights"
 if (-not (Test-Path $ModelFile)) {
-    Write-Warn "4.7 GB download; this is the long step. It resumes if interrupted."
-    Get-RemoteFile $ModelUrl $ModelFile "higgs-audio-v3-tts-4b-q8_0.gguf"
+    Write-Warn "4.7 GB download via hf with fast Xet transfers; it resumes if interrupted."
+    Get-HuggingFaceFile $ModelRepo $ModelRepoFile $ModelFile "higgs-audio-v3-tts-4b-q8_0.gguf"
 }
 $sizeGB = [math]::Round((Get-Item $ModelFile).Length / 1GB, 2)
 if ($sizeGB -lt 4.0) {
